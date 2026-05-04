@@ -73,6 +73,12 @@ export default defineConfig({
           'Accept': 'application/json, text/plain, */*',
           'Accept-Language': 'zh-TW,zh;q=0.9,en-US;q=0.8,en;q=0.7',
         }
+      },
+      '/twse-proxy': {
+        target: 'https://openapi.twse.com.tw',
+        changeOrigin: true,
+        secure: true,
+        rewrite: (path) => path.replace(/^\/twse-proxy/, ''),
       }
     }
   }
