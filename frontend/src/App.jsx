@@ -65,7 +65,7 @@ async function fetchTWSEPriceMap() {
   const map = {};
   list.forEach((s) => {
     const price = parseFloat((s.ClosingPrice || '').replace(/,/g, ''));
-    if (!isNaN(price) && price > 0) map[s.Code] = price;
+    if (!isNaN(price) && price > 0) map[s.Code] = { price, name: s.Name };
   });
   twseCache = map;
   setTimeout(() => { twseCache = null; }, 60000); // 60秒後清除快取
@@ -88,8 +88,9 @@ async function fetchUSStockPrice(symbol) {
         const data = await proxy.parse(res);
         const meta = data?.chart?.result?.[0]?.meta;
         const price = meta?.regularMarketPrice ?? meta?.previousClose;
+        const name = meta?.shortName || meta?.longName || '';
         if (!price || price <= 0) throw new Error('價格為空');
-        return price;
+        return { price, name };
       } catch (e) {
         errors.push(`${proxy.name}: ${e.message}`);
       }
@@ -110,8 +111,9 @@ async function fetchUSStockViaDev(symbol) {
   const data = await res.json();
   const meta = data?.chart?.result?.[0]?.meta;
   const price = meta?.regularMarketPrice ?? meta?.previousClose;
+  const name = meta?.shortName || meta?.longName || '';
   if (!price) throw new Error('無法取得股價');
-  return price;
+  return { price, name };
 }
 
 // ──────────────────────────────────────────────────────
@@ -129,11 +131,11 @@ async function fetchAllPrices(tickers) {
     try {
       const map = await fetchTWSEPriceMap();
       twTickers.forEach((t) => {
-        const price = map[t.trim()];
-        if (price) {
-          results[t] = { price, symbol: t + '.TW', source: '台灣證交所' };
+        const data = map[t.trim()];
+        if (data) {
+          results[t] = { price: data.price, name: data.name, symbol: t + '.TW', source: '台灣證交所' };
         } else {
-          results[t] = { price: null, error: '今日無成交資料（休市或代號錯誤）' };
+          results[t] = { price: null, name: '', error: '今日無成交資料（休市或代號錯誤）' };
         }
       });
     } catch (e) {
@@ -146,12 +148,12 @@ async function fetchAllPrices(tickers) {
     usTickers.map(async (t) => {
       const sym = t.trim().toUpperCase();
       try {
-        const price = IS_DEV
+        const data = IS_DEV
           ? await fetchUSStockViaDev(sym)
           : await fetchUSStockPrice(sym);
-        results[t] = { price, symbol: sym, source: 'Yahoo Finance' };
+        results[t] = { price: data.price, name: data.name, symbol: sym, source: 'Yahoo Finance' };
       } catch (e) {
-        results[t] = { price: null, error: e.message };
+        results[t] = { price: null, name: '', error: e.message };
       }
     })
   );
@@ -343,6 +345,7 @@ function App() {
                     <div className="stock-title">
                       <h4>
                         {stock.ticker}
+                        {pd?.name && <span className="stock-name-label">{pd.name}</span>}
                         {isTW && <span className="market-badge">TW</span>}
                       </h4>
                       {pd?.error && (

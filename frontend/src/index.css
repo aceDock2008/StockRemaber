@@ -476,6 +476,16 @@ button:active { opacity: 0.8; transform: scale(0.97); }
   gap: 0.4rem;
 }
 
+.stock-name-label {
+  font-size: 0.85rem;
+  font-weight: 500;
+  color: var(--text-secondary);
+  background: rgba(255, 255, 255, 0.05);
+  padding: 0.15rem 0.5rem;
+  border-radius: 4px;
+  margin-left: 0.2rem;
+}
+
 .market-badge {
   font-size: 0.6rem;
   font-weight: 700;
