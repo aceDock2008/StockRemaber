@@ -42,6 +42,8 @@ jobs:
 
       - name: 📋 設定 GitHub Pages
         uses: actions/configure-pages@v4
+        with:
+          enablement: true   # 自動開啟 GitHub Pages（如果還沒開啟）
 
       - name: 📤 上傳編譯結果
         uses: actions/upload-pages-artifact@v3
