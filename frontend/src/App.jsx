@@ -48,43 +48,60 @@ async function fetchViaDev(symbol) {
 // ────────────────────────────────────────────
 // 正式模式：透過 CORS Proxy 呼叫 Yahoo Finance
 // ────────────────────────────────────────────
+
+// 嘗試三個不同的 Proxy 服務（依序試，誰回應就用誰）
 const CORS_PROXIES = [
   {
     name: 'AllOrigins',
-    build: (yahooUrl) => `https://api.allorigins.win/get?url=${encodeURIComponent(yahooUrl)}`,
+    // allorigins 需要把目標 URL 編碼後放在 url= 參數裡
+    build: (u) => `https://api.allorigins.win/get?url=${encodeURIComponent(u)}`,
     parse: async (res) => {
       const outer = await res.json();
-      if (!outer.contents) throw new Error('AllOrigins 回傳空內容');
+      if (!outer.contents) throw new Error('回傳空內容');
       return JSON.parse(outer.contents);
     },
   },
   {
     name: 'CorsProxy.io',
-    // corsproxy.io 不需要編碼整個 URL，只要直接附在後面
-    build: (yahooUrl) => `https://corsproxy.io/?${yahooUrl}`,
+    // ★ 修正：必須 encodeURIComponent，否則 URL 裡的 & 會被誤解
+    build: (u) => `https://corsproxy.io/?${encodeURIComponent(u)}`,
+    parse: async (res) => res.json(),
+  },
+  {
+    name: 'ThingProxy',
+    // thingproxy 直接附在路徑後面，不需編碼
+    build: (u) => `https://thingproxy.freeboard.io/fetch/${u}`,
     parse: async (res) => res.json(),
   },
 ];
 
+// Yahoo Finance 嘗試兩個不同的主機（有時候 query1 快、有時候 query2 快）
+const YAHOO_HOSTS = ['https://query1.finance.yahoo.com', 'https://query2.finance.yahoo.com'];
+
 async function fetchViaCorsProxy(symbol) {
-  const yahooUrl = `https://query2.finance.yahoo.com${YAHOO_PATH(symbol)}`;
   const errors = [];
 
-  for (const proxy of CORS_PROXIES) {
-    try {
-      const res = await fetch(proxy.build(yahooUrl), {
-        signal: AbortSignal.timeout(12000),
-      });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const data = await proxy.parse(res);
-      const price = parseYahooResponse(data);
-      return { price, symbol, source: `Yahoo (${proxy.name})` };
-    } catch (err) {
-      console.warn(`[${proxy.name}] ${symbol} 失敗:`, err.message);
-      errors.push(`${proxy.name}: ${err.message}`);
+  for (const host of YAHOO_HOSTS) {
+    const yahooUrl = `${host}/v8/finance/chart/${symbol}?interval=1d&range=5d`;
+
+    for (const proxy of CORS_PROXIES) {
+      try {
+        const res = await fetch(proxy.build(yahooUrl), {
+          signal: AbortSignal.timeout(12000),
+        });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const data = await proxy.parse(res);
+        const price = parseYahooResponse(data);
+        return { price, symbol, source: `Yahoo (${proxy.name})` };
+      } catch (err) {
+        const label = `${proxy.name}/${host.includes('query1') ? 'q1' : 'q2'}`;
+        console.warn(`[${label}] ${symbol}:`, err.message);
+        errors.push(`${label}: ${err.message}`);
+      }
     }
   }
-  throw new Error(errors.join(' | '));
+
+  throw new Error(`全部 ${errors.length} 個來源失敗。最後錯誤：${errors[errors.length - 1]}`);
 }
 
 // ────────────────────────────────────────────
