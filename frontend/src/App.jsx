@@ -4,136 +4,139 @@ import { Plus, RefreshCw, Trash2, TrendingUp, TrendingDown, Wallet, Wifi, WifiOf
 // ============================================================
 // 股票價格抓取核心邏輯
 //
-// ★ 開發模式 (localhost)：
-//   → 透過 Vite 內建的伺服器轉發，完全沒有 CORS 問題
+// ★ 開發模式 (localhost)：Vite 伺服器幫忙轉發，不需要 CORS Proxy
+// ★ 正式上線 (GitHub Pages)：透過公開 CORS Proxy 呼叫 Yahoo Finance
 //
-// ★ 正式上線 (GitHub Pages)：
-//   → 使用公開 CORS Proxy 繞過瀏覽器安全限制
+// 使用 v7/finance/quote API（比 v8/chart 限制更少、更穩定）
+// 支援批次查詢：一次呼叫抓所有股票
 // ============================================================
 
-// import.meta.env.DEV 是 Vite 提供的環境變數：
-//   true  = 你在電腦本地跑 npm run dev
-//   false = 已經 build 好並部署到 GitHub Pages
 const IS_DEV = import.meta.env.DEV;
 
-// Yahoo Finance API 路徑（v8 chart，支援台股和美股）
-const YAHOO_PATH = (symbol) =>
-  `/v8/finance/chart/${symbol}?interval=1d&range=2d`;
-
-// 解析 Yahoo Finance API 回應，取出股價
-function parseYahooResponse(data) {
-  const meta = data?.chart?.result?.[0]?.meta;
-  if (!meta) throw new Error('回應格式不符，Yahoo 可能暫時限制存取');
-  const price = meta.regularMarketPrice ?? meta.previousClose;
-  if (!price || price <= 0) throw new Error('未取得有效股價');
-  return price;
+// ──────────────────────────────────────────────────────
+// 建立 Yahoo Finance v7 quote 查詢 URL
+// 可以一次查多支股票：symbols=2330.TW,2317.TW,AAPL
+// ──────────────────────────────────────────────────────
+function makeYahooQuoteUrl(symbols, host = 'https://query1.finance.yahoo.com') {
+  const joined = Array.isArray(symbols) ? symbols.join(',') : symbols;
+  return `${host}/v7/finance/quote?symbols=${joined}&fields=regularMarketPrice,previousClose,shortName`;
 }
 
-// ────────────────────────────────────────────
-// 開發模式：使用 Vite 開發伺服器代理（最可靠）
-// ────────────────────────────────────────────
-async function fetchViaDev(symbol) {
-  const res = await fetch(`/yahoo-proxy${YAHOO_PATH(symbol)}`, {
-    signal: AbortSignal.timeout(10000),
-  });
-  if (!res.ok) {
-    const errText = await res.text().catch(() => '');
-    throw new Error(`HTTP ${res.status}${errText ? ': ' + errText.slice(0, 80) : ''}`);
+// ──────────────────────────────────────────────────────
+// 解析 Yahoo Finance v7 回應，支援批次結果
+// ──────────────────────────────────────────────────────
+function parseV7QuoteResponse(data, symbolMap) {
+  // symbolMap: { "2330.TW": "2330", "AAPL": "AAPL" }
+  const results = {};
+  const list = data?.quoteResponse?.result ?? [];
+
+  if (list.length === 0) {
+    const err = data?.quoteResponse?.error;
+    throw new Error(err ? JSON.stringify(err) : 'Yahoo 回應為空（可能暫時限制存取）');
   }
-  const data = await res.json();
-  const price = parseYahooResponse(data);
-  return { price, symbol, source: 'Yahoo Finance (本地代理)' };
+
+  list.forEach((quote) => {
+    const ySymbol = quote.symbol; // e.g. "2330.TW"
+    const originalTicker = symbolMap[ySymbol] ?? ySymbol;
+    const price = quote.regularMarketPrice ?? quote.previousClose;
+    if (price && price > 0) {
+      results[originalTicker] = { price, symbol: ySymbol, source: 'Yahoo v7' };
+    } else {
+      results[originalTicker] = { price: null, error: '股價為空（非交易時段）' };
+    }
+  });
+
+  return results;
 }
 
-// ────────────────────────────────────────────
-// 正式模式：透過 CORS Proxy 呼叫 Yahoo Finance
-// ────────────────────────────────────────────
+// ──────────────────────────────────────────────────────
+// 開發模式：Vite 代理（最可靠，無 CORS 問題）
+// ──────────────────────────────────────────────────────
+async function fetchAllViaDev(symbolMap) {
+  const symbols = Object.keys(symbolMap);
+  const path = `/v7/finance/quote?symbols=${symbols.join(',')}&fields=regularMarketPrice,previousClose,shortName`;
+  const res = await fetch(`/yahoo-proxy${path}`, { signal: AbortSignal.timeout(12000) });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  const data = await res.json();
+  return parseV7QuoteResponse(data, symbolMap);
+}
 
-// 嘗試三個不同的 Proxy 服務（依序試，誰回應就用誰）
+// ──────────────────────────────────────────────────────
+// 正式模式：CORS Proxy（GitHub Pages 使用）
+// ──────────────────────────────────────────────────────
 const CORS_PROXIES = [
   {
     name: 'AllOrigins',
-    // allorigins 需要把目標 URL 編碼後放在 url= 參數裡
     build: (u) => `https://api.allorigins.win/get?url=${encodeURIComponent(u)}`,
     parse: async (res) => {
       const outer = await res.json();
-      if (!outer.contents) throw new Error('回傳空內容');
+      if (!outer.contents) throw new Error('AllOrigins 空回應');
       return JSON.parse(outer.contents);
     },
   },
   {
     name: 'CorsProxy.io',
-    // ★ 修正：必須 encodeURIComponent，否則 URL 裡的 & 會被誤解
     build: (u) => `https://corsproxy.io/?${encodeURIComponent(u)}`,
-    parse: async (res) => res.json(),
-  },
-  {
-    name: 'ThingProxy',
-    // thingproxy 直接附在路徑後面，不需編碼
-    build: (u) => `https://thingproxy.freeboard.io/fetch/${u}`,
-    parse: async (res) => res.json(),
+    parse: async (res) => {
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      return res.json();
+    },
   },
 ];
 
-// Yahoo Finance 嘗試兩個不同的主機（有時候 query1 快、有時候 query2 快）
-const YAHOO_HOSTS = ['https://query1.finance.yahoo.com', 'https://query2.finance.yahoo.com'];
+const YAHOO_HOSTS = [
+  'https://query1.finance.yahoo.com',
+  'https://query2.finance.yahoo.com',
+];
 
-async function fetchViaCorsProxy(symbol) {
+async function fetchAllViaCorsProxy(symbolMap) {
+  const symbols = Object.keys(symbolMap);
   const errors = [];
 
   for (const host of YAHOO_HOSTS) {
-    const yahooUrl = `${host}/v8/finance/chart/${symbol}?interval=1d&range=5d`;
-
+    const yahooUrl = makeYahooQuoteUrl(symbols, host);
     for (const proxy of CORS_PROXIES) {
       try {
-        const res = await fetch(proxy.build(yahooUrl), {
-          signal: AbortSignal.timeout(12000),
-        });
+        const res = await fetch(proxy.build(yahooUrl), { signal: AbortSignal.timeout(15000) });
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const data = await proxy.parse(res);
-        const price = parseYahooResponse(data);
-        return { price, symbol, source: `Yahoo (${proxy.name})` };
+        return parseV7QuoteResponse(data, symbolMap);
       } catch (err) {
-        const label = `${proxy.name}/${host.includes('query1') ? 'q1' : 'q2'}`;
-        console.warn(`[${label}] ${symbol}:`, err.message);
+        const label = `${proxy.name}@${host.includes('query1') ? 'q1' : 'q2'}`;
+        console.warn(`[${label}]:`, err.message);
         errors.push(`${label}: ${err.message}`);
       }
     }
   }
 
-  throw new Error(`全部 ${errors.length} 個來源失敗。最後錯誤：${errors[errors.length - 1]}`);
+  throw new Error(`所有來源失敗(${errors.length}次)。最後：${errors.at(-1)}`);
 }
 
-// ────────────────────────────────────────────
-// 主要對外函式：自動選擇正確模式
-// ────────────────────────────────────────────
-async function fetchYahooPrice(rawTicker) {
-  // 台股代號（4~6位數字）自動加 .TW；美股維持大寫
-  const symbol = /^\d{4,6}$/.test(rawTicker.trim())
-    ? `${rawTicker.trim()}.TW`
-    : rawTicker.trim().toUpperCase();
-
-  if (IS_DEV) {
-    return await fetchViaDev(symbol);
-  } else {
-    return await fetchViaCorsProxy(symbol);
-  }
-}
-
-// 批次抓取所有股票價格（平行化，互不影響）
+// ──────────────────────────────────────────────────────
+// 主要對外函式：批次抓所有股票的最新股價
+// ──────────────────────────────────────────────────────
 async function fetchAllPrices(tickers) {
-  const results = {};
-  await Promise.allSettled(
-    tickers.map(async (ticker) => {
-      try {
-        const data = await fetchYahooPrice(ticker);
-        results[ticker] = { price: data.price, symbol: data.symbol, source: data.source };
-      } catch (err) {
-        results[ticker] = { price: null, error: err.message };
-      }
-    })
-  );
-  return results;
+  if (!tickers || tickers.length === 0) return {};
+
+  // 建立 { Yahoo符號 → 原始代號 } 的對照表
+  const symbolMap = {};
+  tickers.forEach((t) => {
+    const ySymbol = /^\d{4,6}$/.test(t.trim()) ? `${t.trim()}.TW` : t.trim().toUpperCase();
+    symbolMap[ySymbol] = t;
+  });
+
+  try {
+    if (IS_DEV) {
+      return await fetchAllViaDev(symbolMap);
+    } else {
+      return await fetchAllViaCorsProxy(symbolMap);
+    }
+  } catch (err) {
+    // 全部失敗時，每支股票都標記錯誤
+    const fallback = {};
+    tickers.forEach((t) => { fallback[t] = { price: null, error: err.message }; });
+    return fallback;
+  }
 }
 
 // ============================================================
@@ -220,8 +223,8 @@ function App() {
       return;
     }
 
-    // 自動為台股代號附加 .TW
-    let processedTicker = /^\d{4,6}$/.test(tickerRaw) ? tickerRaw : tickerRaw.toUpperCase();
+    // 台股代號儲存純數字，美股儲存大寫
+    const processedTicker = /^\d{4,6}$/.test(tickerRaw) ? tickerRaw : tickerRaw.toUpperCase();
 
     const newStock = {
       id: Date.now().toString(),
@@ -235,8 +238,6 @@ function App() {
     setNewBuyPrice('');
     setNewQuantity('');
     setFormError('');
-
-    // 新增後自動抓取新股票的價格
     setTimeout(() => fetchPrices(), 300);
   };
 
