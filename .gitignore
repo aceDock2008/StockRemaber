@@ -1,0 +1,19 @@
+# Python 後端（已不需要，保留備份）
+backend/__pycache__/
+backend/*.pyc
+backend/venv/
+backend/.env
+
+# Node.js 前端
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+
+# 系統檔案
+.DS_Store
+Thumbs.db
+*.log
+
+# 編輯器設定
+.vscode/
+.idea/
